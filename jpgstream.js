@@ -1,147 +1,142 @@
 import { parseExif } from 'exif-reader'
-import { ReadableStream, WritableStream } from 'web-streams-polyfill/ponyfill';
 
-export class JPGTransformStream {
-  constructor() {
-    const unpacker = new JPGUnpacker();
+export async function modifyJPGStream(readable, writable) {
+  let offset = 0
+  let pending = 0
+  let buffers = []
+  let pos = 0
+  let s1 = 0, s2 = 0
+  let state = 'ff'
+  let started = false
+  let dqtSeq = 0
+  let width= -1, height = -1
 
-    this.readable = new ReadableStream({
-      start(controller) {
-        unpacker.push = chunk => controller.enqueue(JSON.stringify(chunk));
-        unpacker.onClose = () => controller.close();
+  const reader = readable.getReader();
+  const writer = writable.getWriter();
+
+  try {
+    for (; ;) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        flushMarker.call(this, state, buffers)
+        break
       }
-    });
 
-    this.writable = new WritableStream({
-      write(uint8Array) {
-        unpacker.addBinaryData(uint8Array);
-      }
-    });
-  }
-}
-
-class JPGUnpacker {
-  constructor() {
-    this.offset = 0
-    this.pending = 0
-    this.buffers = []
-    this.pos = 0
-    this.s1, this.s2 = 0, 0
-    this.state = 'ff'
-    this.started = false
-    this.dqtSeq = 0
-    this.width, this.height = -1, -1
-  }
-
-  addBinaryData(buf) {
-    var j = 0
-    for (var i = 0; i < buf.length; i++) {
-      var b = buf[i]
-      if (state === 'data') {
-        if (b === 0xff) {
-          buffers.push(buf.slice(j, i))
-          state = this.flushMarker(state, buffers)
-          buffers = []
-          j = i
+      var j = 0
+      for (var i = 0; i < value.length; i++) {
+        var b = value[i]
+        if (state === 'data') {
+          if (b === 0xff) {
+            buffers.push(value.slice(j, i))
+            state = flushMarker.call(this, state, buffers)
+            buffers = []
+            j = i
+            state = 'code'
+          }
+          pos++
+          continue
+        }
+        if (pending > 0) {
+          var n = Math.min(value.length - i, pending)
+          buffers.push(value.slice(i, i + n))
+          pending -= n
+          if (pending === 0) {
+            state = flushMarker.call(this, state, buffers)
+            if (state === 'data') j = i
+            buffers = []
+          }
+          i += n - 1
+          pos += n
+          continue
+        }
+        if (state === 'ff' && b !== 0xff) {
+          return next(new Error('expected 0xff, received: ' + hexb(b)))
+        } else if (state === 'ff') {
           state = 'code'
+        } else if (state === 'code') {
+          offset = 0
+          if (b === 0x00) { // data
+            state = 'data'
+            j = i + 1
+          } else if (b === 0xd8) { // SOI
+            started = true
+            state = 'ff'
+            write(writer, { type: 'SOI', start: pos - 1, end: pos + 1 })
+          } else if (b === 0xe0) { // JF{IF,XX}-APP0
+            state = 'app0'
+          } else if (b === 0xda) { // SOS
+            state = 'sos'
+          } else if (b === 0xd9) { // EOI
+            state = 'eoi'
+          } else if (b === 0xe1) { // APP1
+            state = 'app1'
+          } else if (b === 0xe2) { // APP2
+            state = 'app2'
+          } else if (b === 0xdb) { // DQT
+            state = 'dqt'
+          } else if (b === 0xc4) { // DHT
+            state = 'dht'
+          } else if (b === 0xdd) { // DRI
+            state = 'dri'
+          } else if (b === 0xc0) { // SOF
+            state = 'sof'
+          } else if (b === 0xda) { // SOS
+            state = 'sos'
+          } else if (b === 0xfe) { // ???
+            state = '0xfe'
+          } else {
+            return next(new Error('unknown code: ' + hexb(b)))
+          }
+        } else if (state === 'app0') {
+          if (offset === 0) s1 = b
+          else if (offset === 1) s2 = b
+          else if (offset === 2 && b !== 0x4a) {
+            return next(new Error('in app0 expected 0x4a, received: ' + hexb(b)))
+          } else if (offset === 3 && b !== 0x46) {
+            return next(new Error('in app0 expected 0x46, received: ' + hexb(b)))
+          } else if (offset === 4 && b === 0x49) {
+            state = 'jfif-app0'
+            offset = -1
+          } else if (offset === 4 && b === 0x58) {
+            state = 'jfxx-app0'
+            offset = -1
+          } else if (offset >= 4) {
+            return next(new Error(
+              'in app0 expected 0x49 or 0x58, received: ' + hexb(b)))
+          }
+          offset++
+        } else if (state === 'jfif-app0') {
+          if (++offset === 2) {
+            pending = s1 * 256 + s2 - 7
+          }
+        } else {
+          if (offset === 0) s1 = b
+          else if (offset === 1) s2 = b
+          if (++offset === 2) {
+            pending = s1 * 256 + s2 - 2
+          }
         }
         pos++
-        continue
       }
-      if (pending > 0) {
-        var n = Math.min(buf.length - i, pending)
-        buffers.push(buf.slice(i, i + n))
-        pending -= n
-        if (pending === 0) {
-          state = this.flushMarker(state, buffers)
-          if (state === 'data') j = i
-          buffers = []
-        }
-        i += n - 1
-        pos += n
-        continue
+      if (state === 'data') {
+        buffers.push(value.slice(j, i))
       }
-      if (state === 'ff' && b !== 0xff) {
-        return next(new Error('expected 0xff, received: ' + hexb(b)))
-      } else if (state === 'ff') {
-        state = 'code'
-      } else if (state === 'code') {
-        offset = 0
-        if (b === 0x00) { // data
-          state = 'data'
-          j = i + 1
-        } else if (b === 0xd8) { // SOI
-          started = true
-          state = 'ff'
-          this.push({ type: 'SOI', start: pos - 1, end: pos + 1 })
-        } else if (b === 0xe0) { // JF{IF,XX}-APP0
-          state = 'app0'
-        } else if (b === 0xda) { // SOS
-          state = 'sos'
-        } else if (b === 0xd9) { // EOI
-          state = 'eoi'
-        } else if (b === 0xe1) { // APP1
-          state = 'app1'
-        } else if (b === 0xe2) { // APP2
-          state = 'app2'
-        } else if (b === 0xdb) { // DQT
-          state = 'dqt'
-        } else if (b === 0xc4) { // DHT
-          state = 'dht'
-        } else if (b === 0xdd) { // DRI
-          state = 'dri'
-        } else if (b === 0xc0) { // SOF
-          state = 'sof'
-        } else if (b === 0xda) { // SOS
-          state = 'sos'
-        } else if (b === 0xfe) { // ???
-          state = '0xfe'
-        } else {
-          return next(new Error('unknown code: ' + hexb(b)))
-        }
-      } else if (state === 'app0') {
-        if (offset === 0) s1 = b
-        else if (offset === 1) s2 = b
-        else if (offset === 2 && b !== 0x4a) {
-          return next(new Error('in app0 expected 0x4a, received: ' + hexb(b)))
-        } else if (offset === 3 && b !== 0x46) {
-          return next(new Error('in app0 expected 0x46, received: ' + hexb(b)))
-        } else if (offset === 4 && b === 0x49) {
-          state = 'jfif-app0'
-          offset = -1
-        } else if (offset === 4 && b === 0x58) {
-          state = 'jfxx-app0'
-          offset = -1
-        } else if (offset >= 4) {
-          return next(new Error(
-            'in app0 expected 0x49 or 0x58, received: ' + hexb(b)))
-        }
-        offset++
-      } else if (state === 'jfif-app0') {
-        if (++offset === 2) {
-          pending = s1 * 256 + s2 - 7
-        }
+      if (pos > 2 && !started) {
+        throw new Error('start of image not found')
       } else {
-        if (offset === 0) s1 = b
-        else if (offset === 1) s2 = b
-        if (++offset === 2) {
-          pending = s1 * 256 + s2 - 2
-        }
+        break // was calling next()??? idk
       }
-      pos++
     }
-    if (state === 'data') {
-      buffers.push(buf.slice(j, i))
-    }
-    if (pos > 2 && !started) {
-      return next(new Error('start of image not found'))
-    } else next()
+  } catch (e) {
+    console.log(e)
   }
 
-  flushMarker(state, buffers) {
+  function flushMarker(state, buffers) {
     var buf = buffers.length === 1 ? buffers[0] : Buffer.concat(buffers)
+    const dv = new DataView(buf.buffer)
     if (state === 'data') {
-      this.push({
+      write(writer, {
         type: 'DATA',
         start: pos - 2,
         end: pos + buf.length,
@@ -152,15 +147,15 @@ class JPGUnpacker {
       if (buf[2] === 0) units = 'aspect'
       else if (buf[2] === 1) units = 'pixels per inch'
       else if (buf[2] === 2) units = 'pixels per cm'
-      this.push({
+      write(writer, {
         type: 'JFIF',
         start: pos - 9,
         end: pos + buf.length,
         version: buf[0] + '.' + buf[1], // major.minor
         density: {
           units: units,
-          x: buf.readUInt16BE(3),
-          y: buf.readUInt16BE(5)
+          x: dv.getUint16(3),
+          y: dv.getUint16(5)
         },
         thumbnail: {
           width: buf[7],
@@ -190,7 +185,7 @@ class JPGUnpacker {
         thumb.height = buf[1]
         thumb.data = 3 * thumb.width * thumb.height
       }
-      this.push({
+      write(writer, {
         type: 'JFXX',
         start: pos - 9,
         end: pos + buf.length,
@@ -201,9 +196,9 @@ class JPGUnpacker {
       row.type = 'EXIF'
       row.start = pos - 2
       row.end = pos + buf.length
-      this.push(row)
+      write(writer, row)
     } else if (state === 'app2') {
-      this.push({
+      write(writer, {
         type: 'FPXR',
         start: pos - 2,
         end: pos + buf.length
@@ -217,36 +212,36 @@ class JPGUnpacker {
         }
         tables.push(buf.slice(i, i + 0x40))
       }
-      this.push({
+      write(writer, {
         type: 'DQT',
         start: pos - 2,
         end: pos + buf.length,
         tables: tables
       })
     } else if (state === 'dht') {
-      this.push({
+      write(writer, {
         type: 'DHT',
         start: pos - 2,
         end: pos + buf.length,
         data: buf
       })
     } else if (state === 'dri') {
-      this.push({
+      write(writer, {
         type: 'DRI',
         start: pos - 2,
         end: pos + buf.length
       })
     } else if (state === 'sos') {
-      this.push({
+      write(writer, {
         type: 'SOS',
         start: pos - 2,
         end: pos + buf.length
       })
       return 'data'
     } else if (state === 'sof') {
-      width = buf.readUInt16BE(3)
-      height = buf.readUInt16BE(1)
-      this.push({
+      width = dv.getUint16(3)
+      height = dv.getUint16(1)
+      write(writer, {
         type: 'SOF',
         start: pos - 2,
         end: pos + buf.length,
@@ -257,7 +252,7 @@ class JPGUnpacker {
         V0: buf[7] % 16
       })
     } else if (state === 'eoi') {
-      this.push({
+      write(writer, {
         type: 'EOI',
         start: pos - 2,
         end: pos + buf.length,
@@ -265,6 +260,17 @@ class JPGUnpacker {
     }
     return 'ff'
   }
+}
+
+function write(writer, obj) {
+  const encoder = new TextEncoder();
+  writer.write(
+    encoder.encode(
+      JSON.stringify(
+        obj
+      )
+    )
+  )
 }
 
 function hexb(n) { return '0x' + (n < 0x10 ? '0' : '') + n.toString(16) }

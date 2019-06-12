@@ -1,4 +1,4 @@
-import { JPGTransformStream } from "./jpgstream.js"
+import { modifyJPGStream } from "./jpgstream.js"
 
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request))
@@ -9,11 +9,11 @@ addEventListener('fetch', event => {
  * @param {Request} request
  */
 async function handleRequest(request) {
-  return fetch('http://httpbin.org/image/jpeg').then(
-    r => r.body
-  ).then(
-    b => b.pipeThrough(new JPGTransformStream())
-  ).then(
-    rs => new Response(rs, { status: 200 })
-  )
+  let response = await fetch('http://httpbin.org/image/jpeg')
+
+  let { readable, writable } = new TransformStream()
+  let newResponse = new Response(readable, { status: 200 })
+  modifyJPGStream(response.body, writable)
+  return newResponse
+  // return new Response(readable, response)
 }
