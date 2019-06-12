@@ -1,0 +1,26 @@
+{
+    "name": "jpgstream",
+    "version": "1.0.0",
+    "description": "A template for kick starting a Cloudflare Workers project",
+    "main": "index.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "format": "prettier --write '**/*.{js,css,json,md}'"
+    },
+    "author": "Aaron Lisman <alisman@cloudflare.com>",
+    "license": "MIT",
+    "devDependencies": {
+        "husky": "^2.1.0",
+        "prettier": "^1.17.0"
+    },
+    "husky": {
+        "hooks": {
+            "pre-commit": "npm run format",
+            "pre-push": "npm run format"
+        }
+    },
+    "dependencies": {
+        "exif-reader": "^1.0.2",
+        "web-streams-polyfill": "^2.0.3"
+    }
+}
