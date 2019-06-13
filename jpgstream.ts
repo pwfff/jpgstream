@@ -66,26 +66,22 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     return code[0];
   }
 
-  function decodeScan(data: IndexableStream, offset: number,
+  async function decodeScan(data: IndexableStream, offset: number,
     frame: JPEGFrame, components: Component[], resetInterval: number,
     spectralStart: number, spectralEnd: number,
     successivePrev: number, successive: number) {
-    var precision = frame.precision;
-    var samplesPerLine = frame.samplesPerLine;
-    var scanLines = frame.scanLines;
     var mcusPerLine = frame.mcusPerLine;
     var progressive = frame.progressive;
-    var maxH = frame.maxH, maxV = frame.maxV;
 
     var startOffset = offset, bitsData = 0, bitsCount = 0;
-    function readBit() {
+    async function readBit() {
       if (bitsCount > 0) {
         bitsCount--;
         return (bitsData >> bitsCount) & 1;
       }
-      bitsData = data[offset++];
+      bitsData = await data[offset++];
       if (bitsData == 0xFF) {
-        var nextByte = data[offset++];
+        var nextByte = await data[offset++];
         if (nextByte) {
           throw new Error("unexpected marker: " + ((bitsData << 8) | nextByte).toString(16));
         }
@@ -94,9 +90,9 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       bitsCount = 7;
       return bitsData >>> 7;
     }
-    function decodeHuffman(tree: Node): number {
+    async function decodeHuffman(tree: Node): Promise<number> {
       var node: Node | Number = tree, bit;
-      while ((bit = readBit()) !== null) {
+      while ((bit = await readBit()) !== null) {
         let ret = (bit == 0 ? node.left : node.right)
         if (typeof ret === 'number')
           return ret;
@@ -104,29 +100,29 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       }
       return null;
     }
-    function receive(length: number) {
+    async function receive(length: number) {
       var n = 0;
       while (length > 0) {
-        var bit = readBit();
+        var bit = await readBit();
         if (bit === null) return;
         n = (n << 1) | bit;
         length--;
       }
       return n;
     }
-    function receiveAndExtend(length: number) {
-      var n = receive(length);
+    async function receiveAndExtend(length: number) {
+      var n = await receive(length);
       if (n >= 1 << (length - 1))
         return n;
       return n + (-1 << length) + 1;
     }
-    function decodeBaseline(component: Component, zz: Int32Array) {
-      var t = decodeHuffman(component.huffmanTableDC);
-      var diff = t === 0 ? 0 : receiveAndExtend(t);
+    async function decodeBaseline(component: Component, zz: Int32Array) {
+      var t = await decodeHuffman(component.huffmanTableDC);
+      var diff = t === 0 ? 0 : await receiveAndExtend(t);
       zz[0] = (component.pred += diff);
       var k = 1;
       while (k < 64) {
-        var rs = decodeHuffman(component.huffmanTableAC);
+        var rs = await decodeHuffman(component.huffmanTableAC);
         var s = rs & 15, r = rs >> 4;
         if (s === 0) {
           if (r < 15)
@@ -136,32 +132,32 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         }
         k += r;
         var z = dctZigZag[k];
-        zz[z] = receiveAndExtend(s);
+        zz[z] = await receiveAndExtend(s);
         k++;
       }
     }
 
-    function decodeDCFirst(component: Component, zz: Int32Array) {
-      var t = decodeHuffman(component.huffmanTableDC);
-      var diff = t === 0 ? 0 : (receiveAndExtend(t) << successive);
+    async function decodeDCFirst(component: Component, zz: Int32Array) {
+      var t = await decodeHuffman(component.huffmanTableDC);
+      var diff = t === 0 ? 0 : (await receiveAndExtend(t) << successive);
       zz[0] = (component.pred += diff);
     }
-    function decodeDCSuccessive(component: Component, zz: Int32Array) {
-      zz[0] |= readBit() << successive;
+    async function decodeDCSuccessive(component: Component, zz: Int32Array) {
+      zz[0] |= await readBit() << successive;
     }
     var eobrun = 0;
-    function decodeACFirst(component: Component, zz: Int32Array) {
+    async function decodeACFirst(component: Component, zz: Int32Array) {
       if (eobrun > 0) {
         eobrun--;
         return;
       }
       var k = spectralStart, e = spectralEnd;
       while (k <= e) {
-        var rs = decodeHuffman(component.huffmanTableAC);
+        var rs = await decodeHuffman(component.huffmanTableAC);
         var s = rs & 15, r = rs >> 4;
         if (s === 0) {
           if (r < 15) {
-            eobrun = receive(r) + (1 << r) - 1;
+            eobrun = await receive(r) + (1 << r) - 1;
             break;
           }
           k += 16;
@@ -169,23 +165,23 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         }
         k += r;
         var z = dctZigZag[k];
-        zz[z] = receiveAndExtend(s) * (1 << successive);
+        zz[z] = await receiveAndExtend(s) * (1 << successive);
         k++;
       }
     }
     var successiveACState = 0, successiveACNextValue: number;
-    function decodeACSuccessive(component: Component, zz: Int32Array) {
+    async function decodeACSuccessive(component: Component, zz: Int32Array) {
       var k = spectralStart, e = spectralEnd, r = 0;
       while (k <= e) {
         var z = dctZigZag[k];
         var direction = zz[z] < 0 ? -1 : 1;
         switch (successiveACState) {
           case 0: // initial state
-            var rs = decodeHuffman(component.huffmanTableAC);
+            var rs = await decodeHuffman(component.huffmanTableAC);
             var s = rs & 15, r = rs >> 4;
             if (s === 0) {
               if (r < 15) {
-                eobrun = receive(r) + (1 << r);
+                eobrun = await receive(r) + (1 << r);
                 successiveACState = 4;
               } else {
                 r = 16;
@@ -194,14 +190,14 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             } else {
               if (s !== 1)
                 throw new Error("invalid ACn encoding");
-              successiveACNextValue = receiveAndExtend(s);
+              successiveACNextValue = await receiveAndExtend(s);
               successiveACState = r ? 2 : 3;
             }
             continue;
           case 1: // skipping r zero items
           case 2:
             if (zz[z])
-              zz[z] += (readBit() << successive) * direction;
+              zz[z] += (await readBit() << successive) * direction;
             else {
               r--;
               if (r === 0)
@@ -210,7 +206,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             break;
           case 3: // set value for a zero item
             if (zz[z])
-              zz[z] += (readBit() << successive) * direction;
+              zz[z] += (await readBit() << successive) * direction;
             else {
               zz[z] = successiveACNextValue << successive;
               successiveACState = 0;
@@ -218,7 +214,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             break;
           case 4: // eob
             if (zz[z])
-              zz[z] += (readBit() << successive) * direction;
+              zz[z] += (await readBit() << successive) * direction;
             break;
         }
         k++;
@@ -297,7 +293,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
 
       // find marker
       bitsCount = 0;
-      marker = (data[offset] << 8) | data[offset + 1];
+      marker = (await data[offset] << 8) | await data[offset + 1];
       if (marker < 0xFF00) {
         throw new Error("marker was not found");
       }
@@ -502,16 +498,22 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     return a < 0 ? 0 : a > 255 ? 255 : a;
   }
 
-  function parse(data: IndexableStream) {
-    var offset = 0, length = data.length;
-    function readUint16() {
-      var value = (data[offset] << 8) | data[offset + 1];
+  async function parse(data: IndexableStream) {
+    var offset = 0;
+    async function writeByte(value: number) {
+      await writer.write(new Uint8Array([value]))
+    }
+    async function writeWord(value: number) {
+      await writer.write(new Uint8Array([((value >> 8) & 0xFF), ((value) & 0xFF)]))
+    }
+    async function readUint16() {
+      var value = (await data[offset] << 8) | await data[offset + 1];
       offset += 2;
       return value;
     }
-    function readDataBlock(): Uint8Array {
-      var length = readUint16();
-      var array = data.subarray(offset, offset + length - 2);
+    async function readDataBlock(): Promise<Uint8Array> {
+      var length = await readUint16();
+      var array = await data.slice(offset, offset + length - 2);
       offset += array.length;
       return array;
     }
@@ -553,18 +555,17 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     }
     var jfif = null;
     var adobe = null;
-    var pixels = null;
     var frame, resetInterval;
     var quantizationTables: Int32Array[] = [], frames = [];
     var huffmanTablesAC: Node[] = [], huffmanTablesDC: Node[] = [];
-    var fileMarker = readUint16();
+    var fileMarker = await readUint16();
     if (fileMarker != 0xFFD8) { // SOI (Start of Image)
       throw new Error("SOI not found");
     }
 
-    fileMarker = readUint16();
+    fileMarker = await readUint16();
     while (fileMarker != 0xFFD9) { // EOI (End of image)
-      var i, j, l;
+      var i, j;
       switch (fileMarker) {
         case 0xFF00: break;
         case 0xFFE0: // APP0 (Application Specific)
@@ -584,7 +585,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         case 0xFFEE: // APP14
         case 0xFFEF: // APP15
         case 0xFFFE: // COM (Comment)
-          var appData = readDataBlock();
+          var appData = await readDataBlock();
 
           if (fileMarker === 0xFFE0) {
             if (appData[0] === 0x4A && appData[1] === 0x46 && appData[2] === 0x49 &&
@@ -596,7 +597,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
                 yDensity: (appData[10] << 8) | appData[11],
                 thumbWidth: appData[12],
                 thumbHeight: appData[13],
-                thumbData: appData.subarray(14, 14 + 3 * appData[12] * appData[13])
+                thumbData: appData.slice(14, 14 + 3 * appData[12] * appData[13])
               };
             }
           }
@@ -615,20 +616,20 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
           break;
 
         case 0xFFDB: // DQT (Define Quantization Tables)
-          var quantizationTablesLength = readUint16();
+          var quantizationTablesLength = await readUint16();
           var quantizationTablesEnd = quantizationTablesLength + offset - 2;
           while (offset < quantizationTablesEnd) {
-            var quantizationTableSpec = data[offset++];
+            var quantizationTableSpec = await data[offset++];
             var tableData = new Int32Array(64);
             if ((quantizationTableSpec >> 4) === 0) { // 8 bit values
               for (j = 0; j < 64; j++) {
                 var z = dctZigZag[j];
-                tableData[z] = data[offset++];
+                tableData[z] = await data[offset++];
               }
             } else if ((quantizationTableSpec >> 4) === 1) { //16 bit
               for (j = 0; j < 64; j++) {
                 var z = dctZigZag[j];
-                tableData[z] = readUint16();
+                tableData[z] = await readUint16();
               }
             } else
               throw new Error("DQT: invalid table spec");
@@ -639,15 +640,14 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         case 0xFFC0: // SOF0 (Start of Frame, Baseline DCT)
         case 0xFFC1: // SOF1 (Start of Frame, Extended DCT)
         case 0xFFC2: // SOF2 (Start of Frame, Progressive DCT)
-          readUint16(); // skip data length
-          frame = new JPEGFrame(fileMarker, data[offset++], readUint16(), readUint16())
-          var componentsCount = data[offset++], componentId: number;
-          var maxH = 0, maxV = 0;
+          await readUint16(); // skip data length
+          frame = new JPEGFrame(fileMarker, await data[offset++], await readUint16(), await readUint16())
+          var componentsCount = await data[offset++], componentId: number;
           for (i = 0; i < componentsCount; i++) {
-            componentId = data[offset];
-            var h = data[offset + 1] >> 4;
-            var v = data[offset + 1] & 15;
-            var qId = data[offset + 2];
+            componentId = await data[offset];
+            var h = await data[offset + 1] >> 4;
+            var v = await data[offset + 1] & 15;
+            var qId = await data[offset + 2];
             frame.componentsOrder.push(componentId);
             frame.components[componentId] = new Component(h, v, qId);
             offset += 3;
@@ -657,16 +657,16 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
           break;
 
         case 0xFFC4: // DHT (Define Huffman Tables)
-          var huffmanLength = readUint16();
+          var huffmanLength = await readUint16();
           for (i = 2; i < huffmanLength;) {
-            var huffmanTableSpec = data[offset++];
+            var huffmanTableSpec = await data[offset++];
             var codeLengths = new Uint8Array(16);
             var codeLengthSum = 0;
             for (j = 0; j < 16; j++ , offset++)
-              codeLengthSum += (codeLengths[j] = data[offset]);
+              codeLengthSum += (codeLengths[j] = await data[offset]);
             var huffmanValues = new Uint8Array(codeLengthSum);
             for (j = 0; j < codeLengthSum; j++ , offset++)
-              huffmanValues[j] = data[offset];
+              huffmanValues[j] = await data[offset];
             i += 17 + codeLengthSum;
 
             ((huffmanTableSpec >> 4) === 0 ?
@@ -676,25 +676,25 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
           break;
 
         case 0xFFDD: // DRI (Define Restart Interval)
-          readUint16(); // skip data length
-          resetInterval = readUint16();
+          await readUint16(); // skip data length
+          resetInterval = await readUint16();
           break;
 
         case 0xFFDA: // SOS (Start of Scan)
-          var scanLength = readUint16();
-          var selectorsCount = data[offset++];
+          var scanLength = await readUint16();
+          var selectorsCount = await data[offset++];
           var components = [], component;
           for (i = 0; i < selectorsCount; i++) {
-            component = frame.components[data[offset++]];
-            var tableSpec = data[offset++];
+            component = frame.components[await data[offset++]];
+            var tableSpec = await data[offset++];
             component.huffmanTableDC = huffmanTablesDC[tableSpec >> 4];
             component.huffmanTableAC = huffmanTablesAC[tableSpec & 15];
             components.push(component);
           }
-          var spectralStart = data[offset++];
-          var spectralEnd = data[offset++];
-          var successiveApproximation = data[offset++];
-          var processed = decodeScan(data, offset,
+          var spectralStart = await data[offset++];
+          var spectralEnd = await data[offset++];
+          var successiveApproximation = await data[offset++];
+          var processed = await decodeScan(data, offset,
             frame, components, resetInterval,
             spectralStart, spectralEnd,
             successiveApproximation >> 4, successiveApproximation & 15);
@@ -702,14 +702,14 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
           break;
 
         case 0xFFFF: // Fill bytes
-          if (data[offset] !== 0xFF) { // Avoid skipping a valid marker.
+          if (await data[offset] !== 0xFF) { // Avoid skipping a valid marker.
             offset--;
           }
           break;
 
         default:
-          if (data[offset - 3] == 0xFF &&
-            data[offset - 2] >= 0xC0 && data[offset - 2] <= 0xFE) {
+          if (await data[offset - 3] == 0xFF &&
+            await data[offset - 2] >= 0xC0 && await data[offset - 2] <= 0xFE) {
             // could be incorrect encoding -- last 0xFF byte of the previous
             // block was eaten by the encoder
             offset -= 3;
@@ -717,7 +717,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
           }
           throw new Error("unknown JPEG marker " + fileMarker.toString(16));
       }
-      fileMarker = readUint16();
+      fileMarker = await readUint16();
     }
     if (frames.length != 1)
       throw new Error("only single frame JPEGs supported");
@@ -1064,7 +1064,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
 
 function hexb(n: number): string { return '0x' + (n < 0x10 ? '0' : '') + n.toString(16) }
 
-type DecodeFunction = (component: Component, zz: Int32Array) => void
+type DecodeFunction = (component: Component, zz: Int32Array) => Promise<void>
 
 class JPEGFrame {
   extended: boolean

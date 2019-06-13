@@ -1,5 +1,5 @@
 export class IndexableStream {
-  [index: number]: number
+  [index: number]: Promise<number>
   [index: string]: any
 
   reader: ReadableStreamDefaultReader;
@@ -34,6 +34,31 @@ export class IndexableStream {
     }
 
     return this.buffer[i - this.offset]
+  }
+
+  async slice(from: number, to: number): Promise<Uint8Array> {
+    if (from < this.offset) {
+      throw new Error(`can't get data before ${this.offset}`)
+    }
+
+    while (from > this.offset + this.buffer.length) {
+      await this.read()
+    }
+
+    let ret = new Uint8Array(to - from)
+    let writeOffset = 0
+
+    while (to > this.offset + this.buffer.length) {
+      let toWrite = this.buffer.slice(from + writeOffset - this.offset)
+      ret.set(toWrite, writeOffset)
+      writeOffset += toWrite.length
+      this.read()
+    }
+
+    let toWrite = this.buffer.slice(from + writeOffset - this.offset, to - this.offset)
+    ret.set(toWrite, writeOffset)
+
+    return ret
   }
 
   async read() {
