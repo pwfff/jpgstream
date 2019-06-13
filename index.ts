@@ -1,6 +1,6 @@
-import { modifyJPGStream } from "./jpgstream.js"
+import { modifyJPGStream } from "./jpgstream"
 
-addEventListener('fetch', event => {
+addEventListener('fetch', (event: FetchEvent) => {
   event.respondWith(handleRequest(event.request))
 })
 
@@ -8,7 +8,7 @@ addEventListener('fetch', event => {
  * Fetch and log a request
  * @param {Request} request
  */
-async function handleRequest(request) {
+async function handleRequest(request: Request) {
   const providedUrl = new URL(request.url).searchParams.get('url')
   const url = providedUrl ? providedUrl : 'http://httpbin.org/image/jpeg'
   let response = await fetch(url)
