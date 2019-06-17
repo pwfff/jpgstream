@@ -20,13 +20,17 @@ export class IndexableStream {
         if (isNaN(i)) {
           return target[name.toString()]
         }
-        return target.getIndex(i)
+        const ret = target.getIndex(i)
+        return ret.catch(e => {
+          console.log(e)
+          throw e
+        })
       }
     });
   }
 
   async getIndex(i: number): Promise<number> {
-    if (this.buffer.length + this.offset <= i) {
+    if (this.buffer === undefined || (this.buffer.length + this.offset <= i)) {
       if (this.done) {
         throw new Error(`requested byte ${i} but source is done and we only have ${this.buffer.length + this.offset} bytes`)
       }
@@ -37,28 +41,33 @@ export class IndexableStream {
   }
 
   async slice(from: number, to: number): Promise<Uint8Array> {
-    if (from < this.offset) {
-      throw new Error(`can't get data before ${this.offset}`)
-    }
+    try {
+      if (from < this.offset) {
+        throw new Error(`can't get data before ${this.offset}`)
+      }
 
-    while (from > this.offset + this.buffer.length) {
-      await this.read()
-    }
+      while (from > this.offset + this.buffer.length) {
+        await this.read()
+      }
 
-    let ret = new Uint8Array(to - from)
-    let writeOffset = 0
+      let ret = new Uint8Array(to - from)
+      let writeOffset = 0
 
-    while (to > this.offset + this.buffer.length) {
-      let toWrite = this.buffer.slice(from + writeOffset - this.offset)
+      while (to > this.offset + this.buffer.length) {
+        let toWrite = this.buffer.slice(from + writeOffset - this.offset)
+        ret.set(toWrite, writeOffset)
+        writeOffset += toWrite.length
+        await this.read()
+      }
+
+      let toWrite = this.buffer.slice(from + writeOffset - this.offset, to - this.offset)
       ret.set(toWrite, writeOffset)
-      writeOffset += toWrite.length
-      this.read()
+
+      return ret
+    } catch (e) {
+      console.log(e)
+      throw e
     }
-
-    let toWrite = this.buffer.slice(from + writeOffset - this.offset, to - this.offset)
-    ret.set(toWrite, writeOffset)
-
-    return ret
   }
 
   async read() {
@@ -80,7 +89,7 @@ export class IndexableStream {
       lastChunk = this.buffer
     }
 
-    const tmp = new Uint8Array(lastChunk + value.length);
+    const tmp = new Uint8Array(lastChunk.length + value.length);
     tmp.set(lastChunk, 0);
     tmp.set(value, lastChunk.length);
     this.buffer = tmp
