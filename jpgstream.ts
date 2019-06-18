@@ -73,14 +73,18 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     var mcusPerLine = frame.mcusPerLine;
     var progressive = frame.progressive;
 
+    const buffer = new Array<number>();
+
     var startOffset = offset, bitsData = 0, bitsCount = 0;
-    async function writeByte(value: number) {
-      await writer.write(new Uint8Array([value]))
+    var writeOffset = 0;
+
+    function writeByte(value: number) {
+      buffer[writeOffset++] = value
+      //await writer.write(new Uint8Array([value]))
     }
     async function readUint8(): Promise<number> {
       const value = await data[offset++]
-      // TODO: change this to not write, but rather buffer the scan to be re-compressed after manipulation
-      await writeByte(value)
+      writeByte(value)
       return value
     }
     async function readBit() {
@@ -109,25 +113,50 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       }
       return null;
     }
-    async function receive(length: number) {
+    async function receive(length: number): Promise<{ bitsRead: number, value: number }> {
+      var bitsRead = 0;
       var n = 0;
       while (length > 0) {
         var bit = await readBit();
+        bitsRead++;
         if (bit === null) return;
         n = (n << 1) | bit;
         length--;
       }
-      return n;
+      return { bitsRead, value: n };
     }
-    async function receiveAndExtend(length: number) {
-      var n = await receive(length);
+    async function receiveAndExtend(length: number): Promise<{ bitsRead: number, value: number }> {
+      var { bitsRead, value } = await receive(length);
+      var n = value
       if (n >= 1 << (length - 1))
-        return n;
-      return n + (-1 << length) + 1;
+        return { bitsRead, value: n };
+      return { bitsRead, value: n + (-1 << length) + 1 };
     }
     async function decodeBaseline(component: Component, zz: Int32Array) {
       var t = await decodeHuffman(component.huffmanTableDC);
-      var diff = t === 0 ? 0 : await receiveAndExtend(t);
+
+      var diff: number
+      if (t === 0) {
+        diff = 0
+      } else {
+        var { bitsRead, value } = await receiveAndExtend(t);
+        diff = value
+
+        if (Math.random() < .01) {
+          console.log('magic')
+          // do our weird magic here
+          var lastTwo = buffer[buffer.length - 2] << 8 | buffer[buffer.length - 1];
+          // just flip the sign
+          var mask = 1 << (bitsRead + bitsCount + 2)
+          lastTwo = lastTwo ^ mask
+          buffer[buffer.length - 2] = (lastTwo >> 8) & 0xFF
+          buffer[buffer.length - 1] = lastTwo & 0xFF
+        }
+
+        // var bitMask = ((1 << (bitsRead + 1)) - 1) << bitsCount;
+        // bitMask = 0xFFFF ^ bitMask
+        // lastTwo = lastTwo & bitMask
+      }
       zz[0] = (component.pred += diff);
       var k = 1;
       while (k < 64) {
@@ -141,14 +170,22 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         }
         k += r;
         var z = dctZigZag[k];
-        zz[z] = await receiveAndExtend(s);
+        var { value } = await receiveAndExtend(s);
+        zz[z] = value;
         k++;
       }
     }
 
     async function decodeDCFirst(component: Component, zz: Int32Array) {
       var t = await decodeHuffman(component.huffmanTableDC);
-      var diff = t === 0 ? 0 : (await receiveAndExtend(t) << successive);
+
+      var diff: number
+      if (t === 0) {
+        diff = 0
+      } else {
+        var { bitsRead, value } = await receiveAndExtend(t);
+        diff = value << successive
+      }
       zz[0] = (component.pred += diff);
     }
     async function decodeDCSuccessive(component: Component, zz: Int32Array) {
@@ -166,7 +203,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         var s = rs & 15, r = rs >> 4;
         if (s === 0) {
           if (r < 15) {
-            eobrun = await receive(r) + (1 << r) - 1;
+            var { value } = await receive(r)
+            eobrun = value + (1 << r) - 1;
             break;
           }
           k += 16;
@@ -174,7 +212,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         }
         k += r;
         var z = dctZigZag[k];
-        zz[z] = await receiveAndExtend(s) * (1 << successive);
+        var { value } = await receiveAndExtend(s)
+        zz[z] = value * (1 << successive);
         k++;
       }
     }
@@ -190,7 +229,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             var s = rs & 15, r = rs >> 4;
             if (s === 0) {
               if (r < 15) {
-                eobrun = await receive(r) + (1 << r);
+                var { value } = await receive(r)
+                eobrun = value + (1 << r);
                 successiveACState = 4;
               } else {
                 r = 16;
@@ -199,7 +239,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             } else {
               if (s !== 1)
                 throw new Error("invalid ACn encoding");
-              successiveACNextValue = await receiveAndExtend(s);
+              var { value } = await receiveAndExtend(s);
+              successiveACNextValue = value;
               successiveACState = r ? 2 : 3;
             }
             continue;
@@ -303,17 +344,16 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       // find marker
       bitsCount = 0;
       // TODO: readUint8...?
-      marker = (await data[offset] << 8) | await data[offset + 1];
+      marker = (await readUint8() << 8 | await readUint8());
       if (marker < 0xFF00) {
         throw new Error("marker was not found");
       }
 
-      if (marker >= 0xFFD0 && marker <= 0xFFD7) { // RSTx
-        offset += 2;
-      }
-      else
+      if (marker <= 0xFFD0 || marker >= 0xFFD7) // RSTx
         break;
     }
+
+    await writer.write(new Uint8Array(buffer));
 
     return offset - startOffset;
   }
