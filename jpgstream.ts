@@ -32,24 +32,49 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
   var dctSqrt2 = 5793   // sqrt(2)
   var dctSqrt1d2 = 2896  // sqrt(2) / 2
 
-  function buildHuffmanTable(codeLengths: Uint8Array, values: Uint8Array): Node {
-    var k = 0, code: Node[] = [], i, j, length = 16;
+  function buildHuffmanTable(codeLengths: Uint8Array, values: Uint8Array, isDC: boolean, huffmanIndex: number): Node {
+    // k is our index into the values list
+    var k = 0;
+
+    // don't look at any empty code lengths
+    var length = 16;
     while (length > 0 && !codeLengths[length - 1])
       length--;
-    code.push({ left: undefined, right: undefined, index: 0 });
-    var p = code[0], q;
-    for (i = 0; i < length; i++) {
-      for (j = 0; j < codeLengths[i]; j++) {
-        p = code.pop();
-        p.index == 0 ? p.left = values[k] : p.right = values[k]
+
+    // start with an empty root node
+    const codes: Node[] = [{ left: undefined, right: undefined, index: 0 }]
+    var p = codes[0];
+
+    // loop through the code length array, from the beginning
+    for (let i = 0; i < length; i++) {
+
+      // process `codeLengths[i]` number of codes from the values
+      for (let j = 0; j < codeLengths[i]; j++) {
+        const value = values[k]
+
+        // pull the last node off of our list
+        p = codes.pop();
+
+        // p.index tracks if this value should go on the left or right
+        p.index == 0 ? p.left = value : p.right = value;
+
+        // if this node is full, go back until we find a node with room
         while (p.index > 0) {
-          p = code.pop();
+          p = codes.pop();
         }
+        
+        // mark that the next entry goes into the right branch
         p.index++;
-        code.push(p);
-        while (code.length <= i) {
+
+        // get back on the end of our list of nodes
+        codes.push(p);
+
+        // the tree is built such that the values only fill up all the nodes if there
+        // are no more values/nodes under them.
+        // here, we fill the rest of this level of the tree with new, empty nodes.
+        while (codes.length <= i) {
           let q: Node = { left: undefined, right: undefined, index: 0 }
-          code.push(q);
+          codes.push(q);
           p.index == 0 ? p.left = q : p.right = q
           p = q;
         }
@@ -58,12 +83,12 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       if (i + 1 < length) {
         // p here points to last code
         let q: Node = { left: undefined, right: undefined, index: 0 }
-        code.push(q);
+        codes.push(q);
         p.index == 0 ? p.left = q : p.right = q
         p = q;
       }
     }
-    return code[0];
+    return codes[0];
   }
 
   async function decodeScan(data: IndexableStream, offset: number,
@@ -114,7 +139,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       return bitsData >>> 7;
     }
     async function decodeHuffman(tree: Node): Promise<number> {
-      var node: Node | Number = tree, bit;
+      var node: Node | number = tree, bit;
       while ((bit = await readBit()) !== null) {
         let ret = (bit == 0 ? node.left : node.right)
         if (typeof ret === 'number')
@@ -741,9 +766,10 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
               huffmanValues[j] = await readUint8()
             i += 17 + codeLengthSum;
 
-            ((huffmanTableSpec >> 4) === 0 ?
-              huffmanTablesDC : huffmanTablesAC)[huffmanTableSpec & 15] =
-              buildHuffmanTable(codeLengths, huffmanValues);
+            const isDC = (huffmanTableSpec >> 4) === 0;
+            const huffmanIndex = huffmanTableSpec & 15;
+            const table = buildHuffmanTable(codeLengths, huffmanValues, isDC, huffmanIndex);
+            (isDC ? huffmanTablesDC : huffmanTablesAC)[huffmanIndex] = table;
           }
           break;
 
