@@ -75,6 +75,10 @@ export class IndexableStream {
 
     this.done = done
 
+    if (done) {
+      return
+    }
+
     if (this.buffer === undefined) {
       this.buffer = value
       return

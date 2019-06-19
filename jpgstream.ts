@@ -82,10 +82,20 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       buffer[writeOffset++] = value
       //await writer.write(new Uint8Array([value]))
     }
+    async function writeWord(value: number) {
+      await writeByte(((value >> 8) & 0xFF))
+      await writeByte(value & 0xFF)
+    }
     async function readUint8(): Promise<number> {
       const value = await data[offset++]
       writeByte(value)
       return value
+    }
+    async function readUint16(): Promise<number> {
+      var value = (await data[offset] << 8) | await data[offset + 1];
+      offset += 2;
+      await writeWord(value)
+      return value;
     }
     async function readBit() {
       if (bitsCount > 0) {
@@ -142,7 +152,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         var { bitsRead, value } = await receiveAndExtend(t);
         diff = value
 
-        if (Math.random() < .01) {
+        if (false) {
+        // if (Math.random() < .01) {
           console.log('magic')
           // do our weird magic here
           var lastTwo = buffer[buffer.length - 2] << 8 | buffer[buffer.length - 1];
@@ -343,8 +354,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
 
       // find marker
       bitsCount = 0;
-      // TODO: readUint8...?
-      marker = (await readUint8() << 8 | await readUint8());
+      marker = (await data[offset] << 8 | await data[offset + 1]);
       if (marker < 0xFF00) {
         throw new Error("marker was not found");
       }
@@ -626,6 +636,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
 
     fileMarker = await readUint16();
     while (fileMarker != 0xFFD9) { // EOI (End of image)
+      console.log(fileMarker.toString(16))
       var i, j;
       switch (fileMarker) {
         case 0xFF00: break;
@@ -783,6 +794,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     }
     if (frames.length != 1)
       throw new Error("only single frame JPEGs supported");
+
+    return
 
     // set each frame's components quantization table
     for (let i = 0; i < frames.length; i++) {
