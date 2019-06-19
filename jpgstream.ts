@@ -177,8 +177,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         var { bitsRead, value } = await receiveAndExtend(t);
         diff = value
 
-        if (false) {
-        // if (Math.random() < .01) {
+        // if (false) {
+        if (Math.random() < .01) {
           console.log('magic')
           // do our weird magic here
           var lastTwo = buffer[buffer.length - 2] << 8 | buffer[buffer.length - 1];
