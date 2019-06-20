@@ -1,7 +1,4 @@
 export class IndexableStream {
-  [index: number]: Promise<number>
-  [index: string]: any
-
   reader: ReadableStreamDefaultReader;
   buffer: Uint8Array;
   offset: number;
@@ -13,20 +10,6 @@ export class IndexableStream {
     this.offset = 0
     this.lastRead = 0
     this.done = false
-
-    return new Proxy(this, {
-      get(target, name) {
-        const i = Number(name)
-        if (isNaN(i)) {
-          return target[name.toString()]
-        }
-        const ret = target.getIndex(i)
-        return ret.catch(e => {
-          console.log(e)
-          throw e
-        })
-      }
-    });
   }
 
   async getIndex(i: number): Promise<number> {
@@ -71,7 +54,9 @@ export class IndexableStream {
   }
 
   async read() {
+    console.log('reading')
     const { done, value } = await this.reader.read()
+    console.log(done)
 
     this.done = done
 
