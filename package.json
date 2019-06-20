@@ -4,6 +4,7 @@
     "description": "A template for kick starting a Cloudflare Workers project",
     "main": "index.js",
     "scripts": {
+        "build-profiling": "tsc jpgstream.ts --lib es2016,dom --module es2015 --target es2017",
         "test": "echo \"Error: no test specified\" && exit 1",
         "format": "prettier --write '**/*.{js,css,json,md}'"
     },
@@ -13,7 +14,9 @@
         "husky": "^2.4.1",
         "prettier": "^1.17.0",
         "ts-loader": "^6.0.2",
-        "typescript": "^3.6.0-dev.20190613"
+        "typescript": "^3.6.0-dev.20190613",
+        "webpack": "^4.34.0",
+        "webpack-cli": "^3.3.4"
     },
     "husky": {
         "hooks": {

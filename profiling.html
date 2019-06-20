@@ -1,0 +1,15 @@
+<html></html>
+  <head>
+    <script type="module">
+      import {modifyJPGStream} from "./jpgstream.js"
+      const url = 'http://httpbin.org/image/jpeg'
+      var res
+      fetch(url).then(response => {
+        var writable = new WritableStream()
+        modifyJPGStream(response.body, writable).then(d => console.log('done'))
+      })
+    </script>
+  </head>
+  <body>
+  </body>
+</html>

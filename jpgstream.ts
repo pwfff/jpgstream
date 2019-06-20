@@ -1,4 +1,4 @@
-import { IndexableStream } from "./indexable-stream";
+import { IndexableStream } from "./indexable-stream.js";
 
 export async function modifyJPGStream(readable: ReadableStream, writable: WritableStream) {
   const reader = readable.getReader();
@@ -112,12 +112,12 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       await writeByte(value & 0xFF)
     }
     async function readUint8(): Promise<number> {
-      const value = await data[offset++]
+      const value = await data.getIndex(offset++)
       writeByte(value)
       return value
     }
     async function readUint16(): Promise<number> {
-      var value = (await data[offset] << 8) | await data[offset + 1];
+      var value = (await data.getIndex(offset) << 8) | await data.getIndex(offset + 1);
       offset += 2;
       await writeWord(value)
       return value;
@@ -379,7 +379,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
 
       // find marker
       bitsCount = 0;
-      marker = (await data[offset] << 8 | await data[offset + 1]);
+      marker = (await data.getIndex(offset) << 8 | await data.getIndex(offset + 1));
       if (marker < 0xFF00) {
         throw new Error("marker was not found");
       }
@@ -595,12 +595,12 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     // these read functions are only used outside of the scan functions, so we can just write
     // immediately after the read
     async function readUint8(): Promise<number> {
-      const value = await data[offset++]
+      const value = await data.getIndex(offset++)
       await writeByte(value)
       return value
     }
     async function readUint16(): Promise<number> {
-      var value = (await data[offset] << 8) | await data[offset + 1];
+      var value = (await data.getIndex(offset) << 8) | await data.getIndex(offset + 1);
       offset += 2;
       await writeWord(value)
       return value;
@@ -654,12 +654,15 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     var frame, resetInterval;
     var quantizationTables: Int32Array[] = [], frames = [];
     var huffmanTablesAC: Node[] = [], huffmanTablesDC: Node[] = [];
+    console.log('huh')
     var fileMarker = await readUint16();
+    console.log(fileMarker.toString(16))
     if (fileMarker != 0xFFD8) { // SOI (Start of Image)
       throw new Error("SOI not found");
     }
 
     fileMarker = await readUint16();
+    console.log(fileMarker.toString(16))
     while (fileMarker != 0xFFD9) { // EOI (End of image)
       console.log(fileMarker.toString(16))
       var i, j;
@@ -801,14 +804,14 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
 
         case 0xFFFF: // Fill bytes
           // TODO: do we write here?? unwrite?? sup with this
-          if (await data[offset] !== 0xFF) { // Avoid skipping a valid marker.
+          if (await data.getIndex(offset) !== 0xFF) { // Avoid skipping a valid marker.
             offset--;
           }
           break;
 
         default:
-          if (await data[offset - 3] == 0xFF &&
-            await data[offset - 2] >= 0xC0 && await data[offset - 2] <= 0xFE) {
+          if (await data.getIndex(offset - 3) == 0xFF &&
+            await data.getIndex(offset - 2) >= 0xC0 && await data.getIndex(offset - 2) <= 0xFE) {
             // could be incorrect encoding -- last 0xFF byte of the previous
             // block was eaten by the encoder
             offset -= 3;
