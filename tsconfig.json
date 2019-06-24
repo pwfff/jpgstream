@@ -3,6 +3,7 @@
     "outDir": "./dist/",
     "noImplicitAny": true,
     "module": "ESNext",
+    "moduleResolution": "node",
     "target": "ESNext",
     "allowJs": true,
     "lib": ["esnext", "webworker"]

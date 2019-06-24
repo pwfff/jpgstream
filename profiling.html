@@ -2,12 +2,13 @@
   <head>
     <script type="module">
       import {modifyJPGStream} from "./jpgstream.js"
-      const url = 'http://httpbin.org/image/jpeg'
+      const url = 'embedded.jpg'
       var res
       fetch(url).then(response => {
+        console.log(response.status)
         response.arrayBuffer().then(data => {
           var writable = new WritableStream()
-          modifyJPGStream(new Uint8Array(data), writable).then(d => console.log('done'))
+          modifyJPGStream(new Uint8Array(data), writable, 4).then(d => console.log('done'))
         })
       })
     </script>
