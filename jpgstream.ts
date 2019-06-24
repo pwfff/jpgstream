@@ -1,3 +1,5 @@
+import { BitStream, TeeBitStream } from "./bitstream.js";
+
 export async function modifyJPGStream(data: Uint8Array, writable: WritableStream) {
   const writer = writable.getWriter();
 
@@ -40,31 +42,6 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
   var dctSin6 = 3784   // sin(6*pi/16)
   var dctSqrt2 = 5793   // sqrt(2)
   var dctSqrt1d2 = 2896  // sqrt(2) / 2
-
-  const huffmanMaps: { [huffmanIndex: number]: { [code: string]: number } } = {}
-  const reverseHuffmanMaps: { [huffmanIndex: number]: { [value: number]: string } } = {}
-
-  function buildHuffmanMap(node: Node | number, huffmanIndex: number) {
-    huffmanMaps[huffmanIndex] = {}
-    reverseHuffmanMaps[huffmanIndex] = {}
-
-    addToHuffmanMap(node)
-
-    function addToHuffmanMap(node: Node | number, code: string = "") {
-      if (node === undefined)
-        return
-
-      if (typeof node === 'number') {
-        huffmanMaps[huffmanIndex][code] = node
-        reverseHuffmanMaps[huffmanIndex][node] = code
-        return
-      }
-
-      addToHuffmanMap(node.left, code + "0")
-      addToHuffmanMap(node.right, code + "1")
-    }
-    console.log(huffmanIndex, huffmanMaps[huffmanIndex])
-  }
 
   function buildHuffmanTable(codeLengths: Uint8Array, values: Uint8Array, isDC: boolean, huffmanIndex: number): Node {
     // k is our index into the values list
@@ -123,8 +100,6 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
       }
     }
 
-    buildHuffmanMap(codes[0], huffmanIndex)
-
     return codes[0];
   }
 
@@ -135,56 +110,14 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
     var mcusPerLine = frame.mcusPerLine;
     var progressive = frame.progressive;
 
-    // var scanData: Uint8Array
-    // data.slice(offset).some((v, i, a) => {
-    //   if (v == 0xFF && a[i+1] <= 0xD0 && a[i+1] >= 0xD7 ) {
-    //     scanData = a.slice(offset, i)
-    //     return true
-    //   }
-    //   return false
-    // })
+    const bitStream = new TeeBitStream(data, offset);
 
-    const writeBuffer = new Array<number>();
+    var startOffset = offset;
 
-    var startOffset = offset, bitsData = 0, bitMask = 0;
-
-    function writeByte(value: number) {
-      writeBuffer.push(value)
-      //await writer.write(new Uint8Array([value]))
-    }
-    function writeWord(value: number) {
-      writeByte(((value >> 8) & 0xFF))
-      writeByte(value & 0xFF)
-    }
-    function readUint8(): number {
-      const value = data[offset++]
-      writeByte(value)
-      return value
-    }
-    function readUint16(): number {
-      var value = (data[offset] << 8) | data[offset + 1];
-      offset += 2;
-      writeWord(value)
-      return value;
-    }
-    function readBit(): number {
-      bitMask = bitMask >> 1
-      if (bitMask == 0) {
-        bitMask = 0b10000000
-        bitsData = readUint8();
-        if (bitsData == 0xFF) {
-          var nextByte = readUint8();
-          if (nextByte) {
-            throw new Error("unexpected marker: " + ((bitsData << 8) | nextByte).toString(16));
-          }
-        }
-      }
-      return bitsData & bitMask;
-    }
     function decodeHuffman(tree: Node): number {
       // TODO: implement cool STB prefix cache: https://github.com/nothings/stb/blob/master/stb_image.h#L1911
       var node: Node | number = tree, bit;
-      while ((bit = readBit()) !== null) {
+      while ((bit = bitStream.readBit()) !== null) {
         let ret = (bit == 0 ? node.left : node.right)
         if (typeof ret === 'number')
           return ret;
@@ -192,29 +125,15 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
       }
       return null;
     }
-    function receive(length: number): { bitsRead: number, value: number } {
-      var bitsRead = 0;
-      var n = 0;
-      while (length > 0) {
-        var bit = readBit();
-        bitsRead++;
-        if (bit === null) return;
-        n = (n << 1) | bit;
-        length--;
-      }
-      return { bitsRead, value: n };
-    }
-    function receiveAndExtend(length: number): { bitsRead: number, value: number } {
-      var { bitsRead, value } = receive(length);
+    function receiveAndExtend(length: number): number {
+      var value = bitStream.readBits(length);
       var n = value
       if (n >= 1 << (length - 1))
-        return { bitsRead, value: n };
-      return { bitsRead, value: n + (-1 << length) + 1 };
+        return n;
+      return n + (-1 << length) + 1;
     }
+    let toWrite = new BitStream(new Uint8Array([127, 0, 0, 1]), 0)
     function decodeBaseline(component: Component, zz: Int32Array) {
-      let toWrite = [127, 0, 0, 1]
-      let toWriteBytePos = 0
-      let toWriteBitPos = 0
       // TODO: add a secret_key binding, sign
 
       var t = decodeHuffman(component.huffmanTableDC);
@@ -222,7 +141,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
       if (t === 0) {
         diff = 0
       } else {
-        var { bitsRead, value } = receiveAndExtend(t);
+        var value = receiveAndExtend(t);
         diff = value
 
         // if (Math.random() < .01) {
@@ -248,43 +167,37 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
         }
         k += zeroValuesBefore;
         // var z = dctZigZag[k];
-        var { value } = receiveAndExtend(bitsToRead);
+        var value = receiveAndExtend(bitsToRead);
         // zz[z] = value;
         k++;
       }
+
       if (k === 64) {
-        // assume toWrite[0:1] is XXXXXXXX XXXXXXXX, last component is 12 bits,
-        // and we've already written 6 bits of our data
-        if (toWriteBytePos < toWrite.length) {
-          // TODO: handle when we've written a weird number of bits already
-          let writeBytes = toWrite[toWriteBytePos++] << 8 | toWrite[toWriteBytePos++] // all in a word: XXXXXXXXXXXXXXXX
-          let bitsToWrite
+        if (toWrite.bitsLeft > 0) {
+          // assume toWrite[0:1] is XXXXXXXX XXXXXXXX, last component is 12 bits,
+          // and we've already written 6 bits of our data
+          bitsToRead = Math.min(toWrite.bitsLeft, bitsToRead)
+          let writeBits = toWrite.readBits(bitsToRead) // 0000XXXX XXXXXXXX
           let writeMask = (1 << bitsToRead) - 1 // 00001111 11111111
-
-
-          let writeMask2 = writeMask << (16 - bitsToRead) // 11111111 11110000
-          writeBytes = writeBytes & writeMask2 // XXXXXXXX XXXX0000
-          writeBytes = writeBytes >> (16 - bitsToRead) // 0000XXXX XXXXXXXX
 
           // our write buffer has the previous bits (A), the bits we want to replace (B),
           // and maybe some of the next chunk (C)
           // AAAAAABB BBBBBBBB BBCCCCCC
 
           // ok, how many bits have we read into the last byte?
-          let lastByteOffset = masks[bitMask] // 2
-          writeBytes = writeBytes << (8 - lastByteOffset) // 000000XX XXXXXXXX XX000000
-          writeMask = writeMask << (8 - lastByteOffset) // 00000011 11111111 11000000
+          writeBits = writeBits << (bitStream.bitsCount) // 000000XX XXXXXXXX XX000000
+          writeMask = writeMask << (bitStream.bitsCount) // 00000011 11111111 11000000
           let lastThreeWritten = (
-            writeBuffer[writeBuffer.length - 3] << 16
-            | writeBuffer[writeBuffer.length - 2] << 8
-            | writeBuffer[writeBuffer.length - 1]
+            bitStream.writeBuffer[bitStream.writeBuffer.length - 3] << 16
+            | bitStream.writeBuffer[bitStream.writeBuffer.length - 2] << 8
+            | bitStream.writeBuffer[bitStream.writeBuffer.length - 1]
           ) // AAAAAABB BBBBBBBB BBCCCCCC
           let newLastThree = lastThreeWritten & (writeMask ^ 0xFFFFFF) // AAAAAA00 00000000 00CCCCCC
-          newLastThree = newLastThree | writeBytes // AAAAAAXX XXXXXXXX XXCCCCCC
+          newLastThree = newLastThree | writeBits // AAAAAAXX XXXXXXXX XXCCCCCC
 
-          writeBuffer[writeBuffer.length - 3] = newLastThree >> 16
-          writeBuffer[writeBuffer.length - 2] = (newLastThree >> 8) & 0xFF
-          writeBuffer[writeBuffer.length - 1] = newLastThree & 0xFF
+          bitStream.writeBuffer[bitStream.writeBuffer.length - 3] = newLastThree >> 16
+          bitStream.writeBuffer[bitStream.writeBuffer.length - 2] = (newLastThree >> 8) & 0xFF
+          bitStream.writeBuffer[bitStream.writeBuffer.length - 1] = newLastThree & 0xFF
         }
       } else {
         console.log('uhh')
@@ -298,13 +211,13 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
       if (t === 0) {
         diff = 0
       } else {
-        var { bitsRead, value } = receiveAndExtend(t);
+        var value = receiveAndExtend(t);
         diff = value << successive
       }
       zz[0] = (component.pred += diff);
     }
     function decodeDCSuccessive(component: Component, zz: Int32Array) {
-      zz[0] |= readBit() << successive;
+      zz[0] |= bitStream.readBit() << successive;
     }
     var eobrun = 0;
     function decodeACFirst(component: Component, zz: Int32Array) {
@@ -318,7 +231,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
         var s = rs & 15, r = rs >> 4;
         if (s === 0) {
           if (r < 15) {
-            var { value } = receive(r)
+            var value = bitStream.readBits(r)
             eobrun = value + (1 << r) - 1;
             break;
           }
@@ -327,7 +240,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
         }
         k += r;
         var z = dctZigZag[k];
-        var { value } = receiveAndExtend(s)
+        var value = receiveAndExtend(s)
         zz[z] = value * (1 << successive);
         k++;
       }
@@ -344,7 +257,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
             var s = rs & 15, r = rs >> 4;
             if (s === 0) {
               if (r < 15) {
-                var { value } = receive(r)
+                var value = bitStream.readBits(r)
                 eobrun = value + (1 << r);
                 successiveACState = 4;
               } else {
@@ -354,7 +267,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
             } else {
               if (s !== 1)
                 throw new Error("invalid ACn encoding");
-              var { value } = receiveAndExtend(s);
+              var value = receiveAndExtend(s);
               successiveACNextValue = value;
               successiveACState = r ? 2 : 3;
             }
@@ -362,7 +275,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
           case 1: // skipping r zero items
           case 2:
             if (zz[z])
-              zz[z] += (readBit() << successive) * direction;
+              zz[z] += (bitStream.readBit() << successive) * direction;
             else {
               r--;
               if (r === 0)
@@ -371,7 +284,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
             break;
           case 3: // set value for a zero item
             if (zz[z])
-              zz[z] += (readBit() << successive) * direction;
+              zz[z] += (bitStream.readBit() << successive) * direction;
             else {
               zz[z] = successiveACNextValue << successive;
               successiveACState = 0;
@@ -379,7 +292,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
             break;
           case 4: // eob
             if (zz[z])
-              zz[z] += (readBit() << successive) * direction;
+              zz[z] += (bitStream.readBit() << successive) * direction;
             break;
         }
         k++;
@@ -458,7 +371,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
 
       // find marker
       // bitsCount = 0;
-      marker = (data[offset] << 8 | data[offset + 1]);
+      marker = (data[bitStream.offset] << 8 | data[bitStream.offset + 1]);
       if (marker < 0xFF00) {
         throw new Error("marker was not found");
       }
@@ -467,9 +380,9 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
         break;
     }
 
-    await writer.write(new Uint8Array(writeBuffer));
+    await writer.write(new Uint8Array(bitStream.writeBuffer));
 
-    return offset - startOffset;
+    return bitStream.offset - startOffset;
   }
 
   function buildComponentData(frame: JPEGFrame, component: Component) {
