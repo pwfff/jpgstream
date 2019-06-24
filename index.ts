@@ -21,6 +21,7 @@ async function handleRequest(request: Request) {
 
   let { readable, writable } = new TransformStream()
   let newResponse = new Response(readable, response)
-  modifyJPGStream(response.body, writable)
+  let body = await response.arrayBuffer()
+  modifyJPGStream(new Uint8Array(body), writable)
   return newResponse
 }

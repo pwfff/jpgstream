@@ -1,7 +1,4 @@
-import { IndexableStream } from "./indexable-stream.js";
-
-export async function modifyJPGStream(readable: ReadableStream, writable: WritableStream) {
-  const reader = readable.getReader();
+export async function modifyJPGStream(data: Uint8Array, writable: WritableStream) {
   const writer = writable.getWriter();
 
   // https://github.com/eugeneware/jpeg-js/blob/master/lib/decoder.js
@@ -23,6 +20,18 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     63
   ]);
 
+  var masks: { [mask: number]: number } = {
+    // premature optimization ftw
+    0b00000001: 8,
+    0b00000010: 7,
+    0b00000100: 6,
+    0b00001000: 5,
+    0b00010000: 4,
+    0b00100000: 3,
+    0b01000000: 2,
+    0b10000000: 1,
+  }
+
   var dctCos1 = 4017   // cos(pi/16)
   var dctSin1 = 799   // sin(pi/16)
   var dctCos3 = 3406   // cos(3*pi/16)
@@ -31,6 +40,31 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
   var dctSin6 = 3784   // sin(6*pi/16)
   var dctSqrt2 = 5793   // sqrt(2)
   var dctSqrt1d2 = 2896  // sqrt(2) / 2
+
+  const huffmanMaps: { [huffmanIndex: number]: { [code: string]: number } } = {}
+  const reverseHuffmanMaps: { [huffmanIndex: number]: { [value: number]: string } } = {}
+
+  function buildHuffmanMap(node: Node | number, huffmanIndex: number) {
+    huffmanMaps[huffmanIndex] = {}
+    reverseHuffmanMaps[huffmanIndex] = {}
+
+    addToHuffmanMap(node)
+
+    function addToHuffmanMap(node: Node | number, code: string = "") {
+      if (node === undefined)
+        return
+
+      if (typeof node === 'number') {
+        huffmanMaps[huffmanIndex][code] = node
+        reverseHuffmanMaps[huffmanIndex][node] = code
+        return
+      }
+
+      addToHuffmanMap(node.left, code + "0")
+      addToHuffmanMap(node.right, code + "1")
+    }
+    console.log(huffmanIndex, huffmanMaps[huffmanIndex])
+  }
 
   function buildHuffmanTable(codeLengths: Uint8Array, values: Uint8Array, isDC: boolean, huffmanIndex: number): Node {
     // k is our index into the values list
@@ -62,7 +96,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         while (p.index > 0) {
           p = codes.pop();
         }
-        
+
         // mark that the next entry goes into the right branch
         p.index++;
 
@@ -88,59 +122,69 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         p = q;
       }
     }
+
+    buildHuffmanMap(codes[0], huffmanIndex)
+
     return codes[0];
   }
 
-  async function decodeScan(data: IndexableStream, offset: number,
+  async function decodeScan(data: Uint8Array, offset: number,
     frame: JPEGFrame, components: Component[], resetInterval: number,
     spectralStart: number, spectralEnd: number,
     successivePrev: number, successive: number) {
     var mcusPerLine = frame.mcusPerLine;
     var progressive = frame.progressive;
 
-    const buffer = new Array<number>();
+    // var scanData: Uint8Array
+    // data.slice(offset).some((v, i, a) => {
+    //   if (v == 0xFF && a[i+1] <= 0xD0 && a[i+1] >= 0xD7 ) {
+    //     scanData = a.slice(offset, i)
+    //     return true
+    //   }
+    //   return false
+    // })
 
-    var startOffset = offset, bitsData = 0, bitsCount = 0;
-    var writeOffset = 0;
+    const writeBuffer = new Array<number>();
+
+    var startOffset = offset, bitsData = 0, bitMask = 0;
 
     function writeByte(value: number) {
-      buffer[writeOffset++] = value
+      writeBuffer.push(value)
       //await writer.write(new Uint8Array([value]))
     }
-    async function writeWord(value: number) {
-      await writeByte(((value >> 8) & 0xFF))
-      await writeByte(value & 0xFF)
+    function writeWord(value: number) {
+      writeByte(((value >> 8) & 0xFF))
+      writeByte(value & 0xFF)
     }
-    async function readUint8(): Promise<number> {
-      const value = await data.getIndex(offset++)
+    function readUint8(): number {
+      const value = data[offset++]
       writeByte(value)
       return value
     }
-    async function readUint16(): Promise<number> {
-      var value = (await data.getIndex(offset) << 8) | await data.getIndex(offset + 1);
+    function readUint16(): number {
+      var value = (data[offset] << 8) | data[offset + 1];
       offset += 2;
-      await writeWord(value)
+      writeWord(value)
       return value;
     }
-    async function readBit() {
-      if (bitsCount > 0) {
-        bitsCount--;
-        return (bitsData >> bitsCount) & 1;
-      }
-      bitsData = await readUint8();
-      if (bitsData == 0xFF) {
-        var nextByte = await readUint8();
-        if (nextByte) {
-          throw new Error("unexpected marker: " + ((bitsData << 8) | nextByte).toString(16));
+    function readBit(): number {
+      bitMask = bitMask >> 1
+      if (bitMask == 0) {
+        bitMask = 0b10000000
+        bitsData = readUint8();
+        if (bitsData == 0xFF) {
+          var nextByte = readUint8();
+          if (nextByte) {
+            throw new Error("unexpected marker: " + ((bitsData << 8) | nextByte).toString(16));
+          }
         }
-        // unstuff 0
       }
-      bitsCount = 7;
-      return bitsData >>> 7;
+      return bitsData & bitMask;
     }
-    async function decodeHuffman(tree: Node): Promise<number> {
+    function decodeHuffman(tree: Node): number {
+      // TODO: implement cool STB prefix cache: https://github.com/nothings/stb/blob/master/stb_image.h#L1911
       var node: Node | number = tree, bit;
-      while ((bit = await readBit()) !== null) {
+      while ((bit = readBit()) !== null) {
         let ret = (bit == 0 ? node.left : node.right)
         if (typeof ret === 'number')
           return ret;
@@ -148,11 +192,11 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       }
       return null;
     }
-    async function receive(length: number): Promise<{ bitsRead: number, value: number }> {
+    function receive(length: number): { bitsRead: number, value: number } {
       var bitsRead = 0;
       var n = 0;
       while (length > 0) {
-        var bit = await readBit();
+        var bit = readBit();
         bitsRead++;
         if (bit === null) return;
         n = (n << 1) | bit;
@@ -160,86 +204,121 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       }
       return { bitsRead, value: n };
     }
-    async function receiveAndExtend(length: number): Promise<{ bitsRead: number, value: number }> {
-      var { bitsRead, value } = await receive(length);
+    function receiveAndExtend(length: number): { bitsRead: number, value: number } {
+      var { bitsRead, value } = receive(length);
       var n = value
       if (n >= 1 << (length - 1))
         return { bitsRead, value: n };
       return { bitsRead, value: n + (-1 << length) + 1 };
     }
-    async function decodeBaseline(component: Component, zz: Int32Array) {
-      var t = await decodeHuffman(component.huffmanTableDC);
+    function decodeBaseline(component: Component, zz: Int32Array) {
+      let toWrite = [127, 0, 0, 1]
+      let toWriteBytePos = 0
+      let toWriteBitPos = 0
+      // TODO: add a secret_key binding, sign
 
+      var t = decodeHuffman(component.huffmanTableDC);
       var diff: number
       if (t === 0) {
         diff = 0
       } else {
-        var { bitsRead, value } = await receiveAndExtend(t);
+        var { bitsRead, value } = receiveAndExtend(t);
         diff = value
 
-        // if (false) {
-        if (Math.random() < .01) {
-          console.log('magic')
-          // do our weird magic here
-          var lastTwo = buffer[buffer.length - 2] << 8 | buffer[buffer.length - 1];
-          // just flip the sign
-          var mask = 1 << (bitsRead + bitsCount + 2)
-          lastTwo = lastTwo ^ mask
-          buffer[buffer.length - 2] = (lastTwo >> 8) & 0xFF
-          buffer[buffer.length - 1] = lastTwo & 0xFF
-        }
-
-        // var bitMask = ((1 << (bitsRead + 1)) - 1) << bitsCount;
-        // bitMask = 0xFFFF ^ bitMask
-        // lastTwo = lastTwo & bitMask
+        // if (Math.random() < .01) {
+        //   // do our weird magic here
+        //   var lastTwo = writeBuffer[writeBuffer.length - 2] << 8 | writeBuffer[writeBuffer.length - 1];
+        //   // just flip the sign
+        //   var mask = bitMask << bitsRead
+        //   lastTwo = lastTwo ^ mask
+        //   writeBuffer[writeBuffer.length - 2] = (lastTwo >> 8) & 0xFF
+        //   writeBuffer[writeBuffer.length - 1] = lastTwo & 0xFF
+        // }
       }
-      zz[0] = (component.pred += diff);
+      // zz[0] = (component.pred += diff);
       var k = 1;
       while (k < 64) {
-        var rs = await decodeHuffman(component.huffmanTableAC);
-        var s = rs & 15, r = rs >> 4;
-        if (s === 0) {
-          if (r < 15)
+        var rs = decodeHuffman(component.huffmanTableAC);
+        var bitsToRead = rs & 15, zeroValuesBefore = rs >> 4;
+        if (bitsToRead === 0) {
+          if (zeroValuesBefore < 15)
             break;
           k += 16;
           continue;
         }
-        k += r;
-        var z = dctZigZag[k];
-        var { value } = await receiveAndExtend(s);
-        zz[z] = value;
+        k += zeroValuesBefore;
+        // var z = dctZigZag[k];
+        var { value } = receiveAndExtend(bitsToRead);
+        // zz[z] = value;
         k++;
+      }
+      if (k === 64) {
+        // assume toWrite[0:1] is XXXXXXXX XXXXXXXX, last component is 12 bits,
+        // and we've already written 6 bits of our data
+        if (toWriteBytePos < toWrite.length) {
+          // TODO: handle when we've written a weird number of bits already
+          let writeBytes = toWrite[toWriteBytePos++] << 8 | toWrite[toWriteBytePos++] // all in a word: XXXXXXXXXXXXXXXX
+          let bitsToWrite
+          let writeMask = (1 << bitsToRead) - 1 // 00001111 11111111
+
+
+          let writeMask2 = writeMask << (16 - bitsToRead) // 11111111 11110000
+          writeBytes = writeBytes & writeMask2 // XXXXXXXX XXXX0000
+          writeBytes = writeBytes >> (16 - bitsToRead) // 0000XXXX XXXXXXXX
+
+          // our write buffer has the previous bits (A), the bits we want to replace (B),
+          // and maybe some of the next chunk (C)
+          // AAAAAABB BBBBBBBB BBCCCCCC
+
+          // ok, how many bits have we read into the last byte?
+          let lastByteOffset = masks[bitMask] // 2
+          writeBytes = writeBytes << (8 - lastByteOffset) // 000000XX XXXXXXXX XX000000
+          writeMask = writeMask << (8 - lastByteOffset) // 00000011 11111111 11000000
+          let lastThreeWritten = (
+            writeBuffer[writeBuffer.length - 3] << 16
+            | writeBuffer[writeBuffer.length - 2] << 8
+            | writeBuffer[writeBuffer.length - 1]
+          ) // AAAAAABB BBBBBBBB BBCCCCCC
+          let newLastThree = lastThreeWritten & (writeMask ^ 0xFFFFFF) // AAAAAA00 00000000 00CCCCCC
+          newLastThree = newLastThree | writeBytes // AAAAAAXX XXXXXXXX XXCCCCCC
+
+          writeBuffer[writeBuffer.length - 3] = newLastThree >> 16
+          writeBuffer[writeBuffer.length - 2] = (newLastThree >> 8) & 0xFF
+          writeBuffer[writeBuffer.length - 1] = newLastThree & 0xFF
+        }
+      } else {
+        console.log('uhh')
       }
     }
 
-    async function decodeDCFirst(component: Component, zz: Int32Array) {
-      var t = await decodeHuffman(component.huffmanTableDC);
+    function decodeDCFirst(component: Component, zz: Int32Array) {
+      var t = decodeHuffman(component.huffmanTableDC);
 
       var diff: number
       if (t === 0) {
         diff = 0
       } else {
-        var { bitsRead, value } = await receiveAndExtend(t);
+        var { bitsRead, value } = receiveAndExtend(t);
         diff = value << successive
       }
       zz[0] = (component.pred += diff);
     }
-    async function decodeDCSuccessive(component: Component, zz: Int32Array) {
-      zz[0] |= await readBit() << successive;
+    function decodeDCSuccessive(component: Component, zz: Int32Array) {
+      zz[0] |= readBit() << successive;
     }
     var eobrun = 0;
-    async function decodeACFirst(component: Component, zz: Int32Array) {
+    function decodeACFirst(component: Component, zz: Int32Array) {
       if (eobrun > 0) {
         eobrun--;
         return;
       }
       var k = spectralStart, e = spectralEnd;
       while (k <= e) {
-        var rs = await decodeHuffman(component.huffmanTableAC);
+        var rs = decodeHuffman(component.huffmanTableAC);
         var s = rs & 15, r = rs >> 4;
         if (s === 0) {
           if (r < 15) {
-            var { value } = await receive(r)
+            var { value } = receive(r)
             eobrun = value + (1 << r) - 1;
             break;
           }
@@ -248,24 +327,24 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         }
         k += r;
         var z = dctZigZag[k];
-        var { value } = await receiveAndExtend(s)
+        var { value } = receiveAndExtend(s)
         zz[z] = value * (1 << successive);
         k++;
       }
     }
     var successiveACState = 0, successiveACNextValue: number;
-    async function decodeACSuccessive(component: Component, zz: Int32Array) {
+    function decodeACSuccessive(component: Component, zz: Int32Array) {
       var k = spectralStart, e = spectralEnd, r = 0;
       while (k <= e) {
         var z = dctZigZag[k];
         var direction = zz[z] < 0 ? -1 : 1;
         switch (successiveACState) {
           case 0: // initial state
-            var rs = await decodeHuffman(component.huffmanTableAC);
+            var rs = decodeHuffman(component.huffmanTableAC);
             var s = rs & 15, r = rs >> 4;
             if (s === 0) {
               if (r < 15) {
-                var { value } = await receive(r)
+                var { value } = receive(r)
                 eobrun = value + (1 << r);
                 successiveACState = 4;
               } else {
@@ -275,7 +354,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             } else {
               if (s !== 1)
                 throw new Error("invalid ACn encoding");
-              var { value } = await receiveAndExtend(s);
+              var { value } = receiveAndExtend(s);
               successiveACNextValue = value;
               successiveACState = r ? 2 : 3;
             }
@@ -283,7 +362,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
           case 1: // skipping r zero items
           case 2:
             if (zz[z])
-              zz[z] += (await readBit() << successive) * direction;
+              zz[z] += (readBit() << successive) * direction;
             else {
               r--;
               if (r === 0)
@@ -292,7 +371,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             break;
           case 3: // set value for a zero item
             if (zz[z])
-              zz[z] += (await readBit() << successive) * direction;
+              zz[z] += (readBit() << successive) * direction;
             else {
               zz[z] = successiveACNextValue << successive;
               successiveACState = 0;
@@ -300,7 +379,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             break;
           case 4: // eob
             if (zz[z])
-              zz[z] += (await readBit() << successive) * direction;
+              zz[z] += (readBit() << successive) * direction;
             break;
         }
         k++;
@@ -311,17 +390,17 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
           successiveACState = 0;
       }
     }
-    async function decodeMcu(component: Component, decode: DecodeFunction, mcu: number, row: number, col: number) {
+    function decodeMcu(component: Component, decode: DecodeFunction, mcu: number, row: number, col: number) {
       var mcuRow = (mcu / mcusPerLine) | 0;
       var mcuCol = mcu % mcusPerLine;
       var blockRow = mcuRow * component.v + row;
       var blockCol = mcuCol * component.h + col;
-      await decode(component, component.blocks[blockRow][blockCol]);
+      decode(component, component.blocks[blockRow][blockCol]);
     }
-    async function decodeBlock(component: Component, decode: DecodeFunction, mcu: number) {
+    function decodeBlock(component: Component, decode: DecodeFunction, mcu: number) {
       var blockRow = (mcu / component.blocksPerLine) | 0;
       var blockCol = mcu % component.blocksPerLine;
-      await decode(component, component.blocks[blockRow][blockCol]);
+      decode(component, component.blocks[blockRow][blockCol]);
     }
 
     var componentsLength = components.length;
@@ -355,7 +434,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       if (componentsLength == 1) {
         component = components[0];
         for (n = 0; n < resetInterval; n++) {
-          await decodeBlock(component, decodeFn, mcu);
+          decodeBlock(component, decodeFn, mcu);
           mcu++;
         }
       } else {
@@ -366,7 +445,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             v = component.v;
             for (j = 0; j < v; j++) {
               for (k = 0; k < h; k++) {
-                await decodeMcu(component, decodeFn, mcu, j, k);
+                decodeMcu(component, decodeFn, mcu, j, k);
               }
             }
           }
@@ -378,8 +457,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
       }
 
       // find marker
-      bitsCount = 0;
-      marker = (await data.getIndex(offset) << 8 | await data.getIndex(offset + 1));
+      // bitsCount = 0;
+      marker = (data[offset] << 8 | data[offset + 1]);
       if (marker < 0xFF00) {
         throw new Error("marker was not found");
       }
@@ -388,7 +467,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
         break;
     }
 
-    await writer.write(new Uint8Array(buffer));
+    await writer.write(new Uint8Array(writeBuffer));
 
     return offset - startOffset;
   }
@@ -583,7 +662,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     return a < 0 ? 0 : a > 255 ? 255 : a;
   }
 
-  async function parse(data: IndexableStream) {
+  async function parse(data: Uint8Array) {
     var offset = 0;
     async function writeByte(value: number) {
       await writer.write(new Uint8Array([value]))
@@ -595,19 +674,18 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     // these read functions are only used outside of the scan functions, so we can just write
     // immediately after the read
     async function readUint8(): Promise<number> {
-      const value = await data.getIndex(offset++)
+      const value = data[offset++]
       await writeByte(value)
       return value
     }
     async function readUint16(): Promise<number> {
-      var value = (await data.getIndex(offset) << 8) | await data.getIndex(offset + 1);
-      offset += 2;
+      var value = (data[offset++] << 8) | data[offset++];
       await writeWord(value)
       return value;
     }
     async function readDataBlock(): Promise<Uint8Array> {
       var length = await readUint16();
-      var array = await data.slice(offset, offset + length - 2);
+      var array = data.slice(offset, offset + length - 2);
       offset += array.length;
       await writer.write(array)
       return array;
@@ -654,7 +732,6 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     var frame, resetInterval;
     var quantizationTables: Int32Array[] = [], frames = [];
     var huffmanTablesAC: Node[] = [], huffmanTablesDC: Node[] = [];
-    console.log('huh')
     var fileMarker = await readUint16();
     console.log(fileMarker.toString(16))
     if (fileMarker != 0xFFD8) { // SOI (Start of Image)
@@ -789,7 +866,9 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
             component = frame.components[await readUint8()];
             var tableSpec = await readUint8();
             component.huffmanTableDC = huffmanTablesDC[tableSpec >> 4];
+            component.DCIndex = tableSpec >> 15
             component.huffmanTableAC = huffmanTablesAC[tableSpec & 15];
+            component.ACIndex = tableSpec & 15
             components.push(component);
           }
           var spectralStart = await readUint8();
@@ -804,14 +883,14 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
 
         case 0xFFFF: // Fill bytes
           // TODO: do we write here?? unwrite?? sup with this
-          if (await data.getIndex(offset) !== 0xFF) { // Avoid skipping a valid marker.
+          if (data[offset] !== 0xFF) { // Avoid skipping a valid marker.
             offset--;
           }
           break;
 
         default:
-          if (await data.getIndex(offset - 3) == 0xFF &&
-            await data.getIndex(offset - 2) >= 0xC0 && await data.getIndex(offset - 2) <= 0xFE) {
+          if (data[offset - 3] == 0xFF &&
+            data[offset - 2] >= 0xC0 && data[offset - 2] <= 0xFE) {
             // could be incorrect encoding -- last 0xFF byte of the previous
             // block was eaten by the encoder
             offset -= 3;
@@ -974,9 +1053,8 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
     return data;
   }
 
-  const indexable = new IndexableStream(reader);
   try {
-    await parse(indexable);
+    await parse(data);
   } catch (e) {
     console.log(e)
   }
@@ -1176,7 +1254,7 @@ export async function modifyJPGStream(readable: ReadableStream, writable: Writab
 
 function hexb(n: number): string { return '0x' + (n < 0x10 ? '0' : '') + n.toString(16) }
 
-type DecodeFunction = (component: Component, zz: Int32Array) => Promise<void>
+type DecodeFunction = (component: Component, zz: Int32Array) => void
 
 class JPEGFrame {
   extended: boolean
@@ -1217,7 +1295,9 @@ class Component {
   blocksPerColumn: number
   blocks: Int32Array[][]
   huffmanTableDC: Node
+  DCIndex: number
   huffmanTableAC: Node
+  ACIndex: number
   quantizationTable: Int32Array
 
   constructor(h: number, v: number, qId: number) {

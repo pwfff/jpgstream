@@ -5,8 +5,10 @@
       const url = 'http://httpbin.org/image/jpeg'
       var res
       fetch(url).then(response => {
-        var writable = new WritableStream()
-        modifyJPGStream(response.body, writable).then(d => console.log('done'))
+        response.arrayBuffer().then(data => {
+          var writable = new WritableStream()
+          modifyJPGStream(new Uint8Array(data), writable).then(d => console.log('done'))
+        })
       })
     </script>
   </head>
