@@ -122,8 +122,8 @@ export class BitWriter {
         else
           this.currentByte = this.currentByte | toWrite
 
-          this.writePos -= length
-          length = 0
+        this.writePos -= length
+        length = 0
       }
     }
 
