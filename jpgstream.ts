@@ -1,4 +1,4 @@
-import { BitStream, TeeBitStream } from "./bitstream.js";
+import { BitStream, TeeBitStream, BitWriter } from "./bitstream";
 import { fromByteArray } from 'ipaddr.js'
 
 export async function modifyJPGStream(data: Uint8Array, writable: WritableStream, embed: number[], recover: boolean) {
@@ -114,7 +114,10 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
     var progressive = frame.progressive;
 
     const bitStream = new TeeBitStream(data, offset);
-    const recoveredBytes = new Array<number>();
+    const recoverer = new BitWriter();
+
+    // TODO: add a secret_key binding, sign
+    let toWrite = new BitStream(new Uint8Array(new Array<number>(embed.length, ...embed)), 0, false)
 
     var startOffset = offset;
 
@@ -136,9 +139,6 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
         return { orig: n, value: n };
       return { orig: n, value: n + (-1 << length) + 1 };
     }
-
-    // TODO: add a secret_key binding, sign
-    let toWrite = new BitStream(new Uint8Array(new Array<number>(embed.length, ...embed)), 0)
 
     function decodeBaseline(component: Component, zz: Int32Array) {
 
@@ -182,20 +182,14 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
         // last chunk of an AC thing, put our values in here
         // in the sample jpg this has always been 1 bit? -1?
         if (recover && (recoverBytes == undefined || recoverBytes > 0)) {
-          if (recoverBits == 0) {
-            if (recoveredByte != undefined) {
-              if (recoverBytes == undefined) {
-                recoverBytes = recoveredByte
-              } else {
-                recoveredBytes.push(recoveredByte)
-                recoverBytes--
-              }
+          let written = recoverer.writeBits(orig, bitsToRead)
+          if (recoverBytes == undefined) {
+            if (written.length) {
+              recoverBytes = written[0] - (written.length - 1)
+              recoverer.buffer.shift()
             }
-            recoverBits = 7
-            recoveredByte = orig << recoverBits
           } else {
-            recoverBits--
-            recoveredByte = recoveredByte | (orig << recoverBits)
+            recoverBytes -= written.length
           }
         } else {
           if (toWrite.bitsLeft > 0) {
@@ -226,7 +220,6 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
           }
         }
       } else {
-        console.log('uhh')
       }
     }
 
@@ -409,10 +402,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
     if (!recover)
       await writer.write(new Uint8Array(bitStream.writeBuffer));
     else {
-      await writer.write(new TextEncoder().encode(recoveredBytes.map(value => {
-        return value.toString(16)
-      }).join(' ')));
-      let addr = fromByteArray(recoveredBytes)
+      let addr = fromByteArray(recoverer.buffer)
       await writer.write(new TextEncoder().encode(addr.toString()));
     }
 

@@ -22,7 +22,9 @@ async function handleRequest(request: Request) {
 
     return newResponse
   } else {
-    const addr = parse(request.headers.get("cf-connecting-ip"))
+    // const connectingIP = request.headers.get('cf-connecting-ip') || '2606:4700:ff02:8250:f479:3dab:3e4a:54c6'
+    const connectingIP = '2606:4700:ff02:8250:f479:3dab:3e4a:54c6'
+    const addr = parse(connectingIP)
     const fetchedUrl = new URL(request.url)
 
     if (fetchedUrl.href.includes('favicon.ico')) {
