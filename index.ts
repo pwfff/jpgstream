@@ -31,7 +31,7 @@ async function handleRequest(request: Request) {
     }
 
     if (!fetchedUrl.searchParams.has('url')) {
-      return new Response(index, {headers: {'Content-Type': 'text.html', 'Cache-Control': 'no-cache'}})
+      return new Response(index, {headers: {'Content-Type': 'text/html', 'Cache-Control': 'no-cache'}})
     }
 
     const providedUrl = fetchedUrl.searchParams.get('url')
