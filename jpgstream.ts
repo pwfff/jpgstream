@@ -1,7 +1,7 @@
 import { BitStream, TeeBitStream, BitWriter } from "./bitstream";
 import { fromByteArray } from 'ipaddr.js'
 
-export async function modifyJPGStream(data: Uint8Array, writable: WritableStream, embed: number[], recover: boolean) {
+export async function modifyJPGStream(data: Uint8Array, writable: WritableStream, payload: Uint8Array, recover: boolean) {
   const writer = writable.getWriter();
 
   let recoverBits = 0, recoveredByte: number = undefined, recoverBytes: number = undefined;
@@ -105,7 +105,7 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
     const recoverer = new BitWriter();
 
     // TODO: add a secret_key binding, sign
-    let toWrite = new BitStream(new Uint8Array(new Array<number>(embed.length, ...embed)), 0, false)
+    let toWrite = new BitStream(new Uint8Array(new Array<number>(payload.length, ...payload)), 0, false)
 
     var startOffset = offset;
 
@@ -390,8 +390,12 @@ export async function modifyJPGStream(data: Uint8Array, writable: WritableStream
     if (!recover)
       await writer.write(new Uint8Array(bitStream.writeBuffer));
     else {
-      let addr = fromByteArray(recoverer.buffer)
-      await writer.write(new TextEncoder().encode(addr.toString()));
+      try {
+        let addr = fromByteArray(recoverer.buffer)
+        await writer.write(new TextEncoder().encode(addr.toString()));
+      } catch {
+        await writer.write(new Uint8Array(recoverer.buffer))
+      }
     }
 
     return bitStream.offset - startOffset;
